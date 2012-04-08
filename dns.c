@@ -15,6 +15,7 @@
 #include <errno.h>
 
 #include <ldns/ldns.h>
+#include <memcache.h>
 
 #define INBUF_SIZE	(4096)
 #define MAXLINE		(256)
@@ -144,14 +145,14 @@ int spoofquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 		goto unwind;
 
 	/* if we have an ip spoof it there */
-	if (ipaddr) {
+	if (ipaddr)
+	{
 		/* an */
-		snprintf(buf, sizeof buf, "%s.\t%d\tIN\tA\t%s",
-		    hostname, 259200, ipaddr);
+		snprintf(buf, sizeof buf, "%s.\t%d\tIN\tA\t%s", hostname, 259200, ipaddr);
 		status = ldns_rr_new_frm_str(&myrr, buf, 0, NULL, &prev);
-		if (status != LDNS_STATUS_OK) {
-			fprintf(stderr, "can't create answer section: %s\n",
-			    ldns_get_errorstr_by_id(status));
+		if (status != LDNS_STATUS_OK)
+		{
+			fprintf(stderr, "can't create answer section: %s\n", ldns_get_errorstr_by_id(status));
 			goto unwind;
 		}
 		ldns_rr_list_push_rr(answer_an, myrr);
@@ -159,12 +160,11 @@ int spoofquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 		prev = NULL;
 
 		/* ns */
-		snprintf(buf, sizeof buf, "%s.\t%d\tIN\tNS\t127.0.0.1.",
-		    hostname, 259200);
+		snprintf(buf, sizeof buf, "%s.\t%d\tIN\tNS\t127.0.0.1.", hostname, 259200);
 		status = ldns_rr_new_frm_str(&myaurr, buf, 0, NULL, &prev);
-		if (status != LDNS_STATUS_OK) {
-			fprintf(stderr, "can't create authority section: %s\n",
-			    ldns_get_errorstr_by_id(status));
+		if (status != LDNS_STATUS_OK)
+		{
+			fprintf(stderr, "can't create authority section: %s\n", ldns_get_errorstr_by_id(status));
 			goto unwind;
 		}
 		ldns_rr_list_push_rr(answer_ns, myaurr);
@@ -234,29 +234,28 @@ unwind:
 	return (rv);
 }
 
-
 int forwardquery(char *hostname, ldns_rr *query_rr, u_int16_t id)
 {
-	size_t			answer_size;
-	u_int16_t		qflags = LDNS_RD;
-	uint8_t			*outbuf = NULL;
-	ldns_rdf		*qname = NULL;
-	ldns_pkt		*respkt = NULL;
-	ldns_rr_type		type;
-	ldns_rr_class		clas;
-	ldns_status		status;
-	int			rv = 1, child = 0;
+	size_t answer_size;
+	u_int16_t qflags = LDNS_RD;
+	uint8_t *outbuf = NULL;
+	ldns_rdf *qname = NULL;
+	ldns_pkt *respkt = NULL;
+	ldns_rr_type type;
+	ldns_rr_class clas;
+	ldns_status status;
+	int rv = 1, child = 0;
 
-	switch (fork()) {
-	case -1:
-		printf("cannot fork\n");
-		break;
-	case 0:
-//		signal(SIGCHLD, SIG_DFL);
-		child = 1;
-		break;
-	default:
-		return (0);
+	switch (fork())
+	{
+		case -1:
+			printf("cannot fork\n");
+			break;
+		case 0:
+			child = 1;
+			break;
+		default:
+			return (0);
 	}
 
 	qname = ldns_dname_new_frm_str(hostname);
@@ -363,6 +362,15 @@ void setupresolver(void)
 	printf("%s %s, serving: %s\n", action, resolv_conf, domainname ? domainname : "no local domain set");
 }
 
+struct memcache *mc;
+char *mc_instance = "127.0.0.1:11211";
+
+void setupmemcache()
+{
+	mc = mc_new();
+	mc_server_add4(mc, mc_instance);
+}
+
 int main(int argc, char *argv[])
 {
 	uint8_t inbuf[INBUF_SIZE];
@@ -373,9 +381,10 @@ int main(int argc, char *argv[])
 	ldns_rr *query_rr;
 	char *hostname;
 	u_int16_t id;
+	char buf[MAXLINE * 2];
 
 	char c;
-	while ((c = getopt (argc, argv, "dp:l:")) != -1)
+	while ((c = getopt (argc, argv, "dp:l:m:")) != -1)
 	{
 		switch (c) 
 		{
@@ -387,6 +396,9 @@ int main(int argc, char *argv[])
 				break;
 			case 'l':
 				listen_addr = optarg;
+				break;
+			case 'm':
+				mc_instance = optarg;
 				break;
 			case '?':
 				if (optopt == 'c')
@@ -401,14 +413,17 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	printf("listen = %s, port = %d\n", listen_addr, port);
+	printf("listen = %s, port = %d, memcache: %s\n", listen_addr, port, mc_instance);
 
 	so = socket(AF_INET, SOCK_DGRAM, 0);
 	if (so == -1)
 		err(1, "can't open socket");
+
 	if (udp_bind(so, port, listen_addr))
 		err(1, "can't udp bind");
+
 	setupresolver();
+	setupmemcache();
 
 	while (1)
 	{
@@ -444,9 +459,25 @@ int main(int argc, char *argv[])
 		printf("query for: %s\n", hostname);
 		id = ldns_pkt_id(query_pkt);
 
-		// XXX condition to spoof or forward question
-//		spoofquery(hostname, ipaddr, query_rr, id);
-		forwardquery(hostname, query_rr, id);
+		/*
+		telnet 127.0.0.1 11211
+		set test.hu 0 0 1 0
+		9
+		STORED
+		get test.hu
+		*/
+
+		// XXX FNV1a32 hash for hostname?
+		char *ret = mc_aget(mc, hostname, strlen(hostname));
+		if (ret)
+		{
+			snprintf(buf, sizeof buf, "127.0.0.%s", ret);
+			free(ret);
+
+			spoofquery(hostname, &buf, query_rr, id);
+		} else {
+			forwardquery(hostname, query_rr, id);
+		}
 
 		free(hostname);
 		ldns_pkt_free(query_pkt);
