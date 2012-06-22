@@ -1,3 +1,15 @@
+/*
+telnet 127.0.0.1 11211
+
+/usr/bin/printf "set 2y.hu 0 0 12 0\r\n78.47.162.53\r\nquit" | nc 127.0.0.1 11211
+/usr/bin/printf "set ns1.2y.hu 0 0 12 0\r\n78.47.162.53\r\nquit" | nc 127.0.0.1 11211
+/usr/bin/printf "set www.2y.hu 0 0 12 0\r\n78.47.162.53\r\nquit" | nc 127.0.0.1 11211
+/usr/bin/printf "set update.2y.hu 0 0 12 0\r\n78.47.162.53\r\nquit" | nc 127.0.0.1 11211
+/usr/bin/printf "set ns2.2y.hu 0 0 12 0\r\n78.47.207.93\r\nquit" | nc 127.0.0.1 11211
+
+get 2y.hu
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -115,16 +127,21 @@ char * hostnamefrompkt(ldns_pkt *pkt, ldns_rr **qrr)
 	return (name);
 }
 
-int spoofquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
+int answerquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 {
 	ldns_status		status;
-	ldns_rr_list		*answer_an = NULL;
-	ldns_rr_list		*answer_ns = NULL;
+	ldns_rr_list		*answer_a = NULL;
+	ldns_rr_list		*answer_ns1 = NULL;
+	ldns_rr_list		*answer_ns2 = NULL;
+	ldns_rr_list		*answer_cname = NULL;
+	ldns_rr_list		*answer_mx = NULL;
+	ldns_rr_list		*answer_soa = NULL;
 	ldns_rr_list		*answer_ad = NULL;
 	ldns_rr_list		*answer_qr = NULL;
 	ldns_pkt		*answer_pkt = NULL;
-	ldns_rr			*myrr = NULL, *myaurr = NULL;
+	ldns_rr			*myrr = NULL;
 	ldns_rdf		*prev = NULL;
+	ldns_rr_type	type;
 	char			buf[MAXLINE * 2];
 	size_t			answer_size;
 	uint8_t			*outbuf = NULL;
@@ -133,43 +150,83 @@ int spoofquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 
 	ipaddr = ip;
 	hostname = hn;
+	type = ldns_rr_get_type(query_rr);
 
-	/* answer section */
-	answer_an = ldns_rr_list_new();
-	if (answer_an == NULL)
+	/* ns & soa for authority */
+	answer_ns1 = ldns_rr_list_new();
+	if (answer_ns1 == NULL)
 		goto unwind;
 
-	/* authority section */
-	answer_ns = ldns_rr_list_new();
-	if (answer_ns == NULL)
-		goto unwind;
-
-	/* if we have an ip spoof it there */
-	if (ipaddr)
+	snprintf(buf, sizeof buf, "%s.\t%d\tIN\tNS\tns1.2y.hu.", hostname, 60);
+	status = ldns_rr_new_frm_str(&myrr, buf, 0, NULL, &prev);
+	if (status != LDNS_STATUS_OK)
 	{
-		/* an */
-		snprintf(buf, sizeof buf, "%s.\t%d\tIN\tA\t%s", hostname, 259200, ipaddr);
+		fprintf(stderr, "can't create authority section: %s\n", ldns_get_errorstr_by_id(status));
+		goto unwind;
+	}
+	ldns_rr_list_push_rr(answer_ns1, myrr);
+	ldns_rdf_deep_free(prev);
+	prev = NULL;
+
+	answer_ns2 = ldns_rr_list_new();
+	if (answer_ns2 == NULL)
+		goto unwind;
+
+	snprintf(buf, sizeof buf, "%s.\t%d\tIN\tNS\tns2.2y.hu.", hostname, 60);
+	status = ldns_rr_new_frm_str(&myrr, buf, 0, NULL, &prev);
+	if (status != LDNS_STATUS_OK)
+	{
+		fprintf(stderr, "can't create authority section: %s\n", ldns_get_errorstr_by_id(status));
+		goto unwind;
+	}
+	ldns_rr_list_push_rr(answer_ns2, myrr);
+	ldns_rdf_deep_free(prev);
+	prev = NULL;
+
+	answer_soa = ldns_rr_list_new();
+	if (answer_soa == NULL)
+		goto unwind;
+
+	snprintf(buf, sizeof buf, "2y.hu.\t1800\tIN\tSOA\tns1.2y.hu. hostmaster.deeb.hu. 1340305068 900 300 604800 1800");
+	status = ldns_rr_new_frm_str(&myrr, buf, 0, NULL, &prev);
+	if (status != LDNS_STATUS_OK)
+	{
+		fprintf(stderr, "can't create authority section: %s\n", ldns_get_errorstr_by_id(status));
+		goto unwind;
+	}
+	ldns_rr_list_push_rr(answer_soa, myrr);
+	ldns_rdf_deep_free(prev);
+	prev = NULL;
+
+	if (ipaddr && (type == LDNS_RR_TYPE_A || type == LDNS_RR_TYPE_ANY))
+	{
+		answer_a = ldns_rr_list_new();
+		if (answer_a == NULL)
+			goto unwind;
+
+		snprintf(buf, sizeof buf, "%s.\t%d\tIN\tA\t%s", hostname, 60, ipaddr);
 		status = ldns_rr_new_frm_str(&myrr, buf, 0, NULL, &prev);
 		if (status != LDNS_STATUS_OK)
 		{
 			fprintf(stderr, "can't create answer section: %s\n", ldns_get_errorstr_by_id(status));
 			goto unwind;
 		}
-		ldns_rr_list_push_rr(answer_an, myrr);
+		ldns_rr_list_push_rr(answer_a, myrr);
 		ldns_rdf_deep_free(prev);
 		prev = NULL;
+	}
 
-		/* ns */
-		snprintf(buf, sizeof buf, "%s.\t%d\tIN\tNS\t127.0.0.1.", hostname, 259200);
-		status = ldns_rr_new_frm_str(&myaurr, buf, 0, NULL, &prev);
-		if (status != LDNS_STATUS_OK)
-		{
-			fprintf(stderr, "can't create authority section: %s\n", ldns_get_errorstr_by_id(status));
-			goto unwind;
-		}
-		ldns_rr_list_push_rr(answer_ns, myaurr);
-		ldns_rdf_deep_free(prev);
-		prev = NULL;
+	if (type == LDNS_RR_TYPE_CNAME || type == LDNS_RR_TYPE_ANY)
+	{
+	}
+
+	if (type == LDNS_RR_TYPE_MX || type == LDNS_RR_TYPE_ANY)
+	{
+	}
+
+	if (type == LDNS_RR_TYPE_SOA)
+	{
+
 	}
 
 	/* question section */
@@ -195,25 +252,49 @@ int spoofquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 		ldns_pkt_set_rcode(answer_pkt, LDNS_RCODE_NXDOMAIN);
 
 	ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_QUESTION, answer_qr);
-	ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_an);
-	ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_AUTHORITY, answer_ns);
+
+	if (answer_soa && type == LDNS_RR_TYPE_ANY)
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_soa);
+	if (answer_ns1 && type == LDNS_RR_TYPE_ANY)
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_ns1);
+	if (answer_ns2 && type == LDNS_RR_TYPE_ANY)
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_ns2);
+	if (answer_a)
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_a);
+	if (answer_ns1 && type == LDNS_RR_TYPE_NS)
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_ns1);
+	if (answer_ns2 && type == LDNS_RR_TYPE_NS)
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_ns2);
+	if (answer_soa && type == LDNS_RR_TYPE_SOA)
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ANSWER, answer_soa);
+
+	// XXX no record (A,MX,NS,CNAME) then authority is SOA not NS
+
+	if (answer_ns1 && (type != LDNS_RR_TYPE_ANY && type != LDNS_RR_TYPE_NS))
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_AUTHORITY, answer_ns1);
+	if (answer_ns2 && (type != LDNS_RR_TYPE_ANY && type != LDNS_RR_TYPE_NS))
+		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_AUTHORITY, answer_ns2);
+
 	ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ADDITIONAL, answer_ad);
 
 	status = ldns_pkt2wire(&outbuf, answer_pkt, &answer_size);
 	if (status != LDNS_STATUS_OK)
-		printf("can't create answer: %s\n",
-		    ldns_get_errorstr_by_id(status));
-	else {
+	{
+		printf("can't create answer: %s\n", ldns_get_errorstr_by_id(status));
+	} else
+	{
 		if (debug) {
-			printf("spoofquery response:\n");
+			printf("answerquery response:\n");
 			logpacket(answer_pkt);
 		}
 
 		if (sendto(so, outbuf, answer_size, 0, &paddr, plen) == -1)
-			printf("spoofquery sendto\n");
-		else {
+		{
+			printf("answerquery sendto\n");
+		} else
+		{
 			rv = 0;
-			printf("spoofquery: spoofing %s to %s\n", hostname, ipaddr ? ipaddr : "NXdomain");
+			printf("answerquery %s to %s\n", hostname, ipaddr ? ipaddr : "NXdomain");
 		}
 	}
 
@@ -224,10 +305,14 @@ unwind:
 		LDNS_FREE(outbuf);
 	if (answer_qr)
 		ldns_rr_list_free(answer_qr);
-	if (answer_an)
-		ldns_rr_list_free(answer_an);
-	if (answer_ns)
-		ldns_rr_list_free(answer_ns);
+	if (answer_a)
+		ldns_rr_list_free(answer_a);
+	if (answer_ns1)
+		ldns_rr_list_free(answer_ns1);
+	if (answer_ns2)
+		ldns_rr_list_free(answer_ns2);
+	if (answer_soa)
+		ldns_rr_list_free(answer_soa);
 	if (answer_ad)
 		ldns_rr_list_free(answer_ad);
 
@@ -273,7 +358,7 @@ int forwardquery(char *hostname, ldns_rr *query_rr, u_int16_t id)
 		printf("forwardquery: query failed, spoofing response\n");
 
 		/* XXX make this tunable? */
-		spoofquery(hostname, NULL, query_rr, id);
+		answerquery(hostname, NULL, query_rr, id);
 		goto unwind;
 	}
 	if (debug)
@@ -456,25 +541,39 @@ int main(int argc, char *argv[])
 			continue;
 		}
 
-		printf("query for: %s\n", hostname);
+		printf("query for: %s IN ", hostname);
+		ldns_rr_type type = ldns_rr_get_type(query_rr);
+		switch (type)
+		{
+			case LDNS_RR_TYPE_A:
+				printf("A\n");
+				break;
+			case LDNS_RR_TYPE_CNAME:
+				printf("A\n");
+				break;
+			case LDNS_RR_TYPE_MX:
+				printf("A\n");
+				break;
+			case LDNS_RR_TYPE_NS:
+				printf("A\n");
+				break;
+			case LDNS_RR_TYPE_SOA:
+				printf("A\n");
+				break;
+			default:
+				printf("unknow %d\n", type);
+				break;
+		}
+
 		id = ldns_pkt_id(query_pkt);
 
-		/*
-		telnet 127.0.0.1 11211
-		set test.hu 0 0 1 0
-		9
-		STORED
-		get test.hu
-		*/
-
-		// XXX FNV1a32 hash for hostname?
 		char *ret = mc_aget(mc, hostname, strlen(hostname));
 		if (ret)
 		{
-			snprintf(buf, sizeof buf, "127.0.0.%s", ret);
+			snprintf(buf, sizeof buf, "%s", ret);
 			free(ret);
 
-			spoofquery(hostname, &buf, query_rr, id);
+			answerquery(hostname, &buf, query_rr, id);
 		} else {
 			forwardquery(hostname, query_rr, id);
 		}
