@@ -24,12 +24,14 @@ if ( !$result )
     die('ERROR: unknow domain');
 }
 
-if (!filter_var($_REQUEST['ip'], FILTER_VALIDATE_IP))
+if (isset($_REQUEST['ip']) && !filter_var($_REQUEST['ip'], FILTER_VALIDATE_IP))
 {
     die('ERROR: not a valid ip');
 }
 
-$sql = sprintf('UPDATE domains SET ip = %s, updated = NOW() WHERE user = "%s" AND domain = "%s"', $db->escape_string($_REQUEST['ip']), $user_id, $domain);
+$_REQUEST['ip'] = $_SERVER['REMOTE_ADDR'];
+
+$sql = sprintf('UPDATE domains SET ip = "%s", updated = NOW() WHERE user = "%s" AND domain = "%s"', $db->escape_string($_REQUEST['ip']), $user_id, $domain);
 $db->query($sql);
 
 $memcache = new Memcache();

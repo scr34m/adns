@@ -15,8 +15,10 @@ get 2y.hu
 #include <string.h>
 #include <err.h>
 
+#include <sys/wait.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <signal.h>
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <net/if_dl.h>
@@ -45,6 +47,40 @@ char *resolv_conf;
 
 // misc
 int debug = 0;
+
+volatile sig_atomic_t   stop;
+
+void sighdlr(int sig)
+{
+	switch (sig) {
+	case SIGINT:
+	case SIGTERM:
+		stop = 1;
+		break;
+	case SIGHUP:
+		break;
+	case SIGCHLD:
+		while (waitpid(WAIT_ANY, NULL, WNOHANG) != -1) /* sig safe */
+			;
+		break;
+	}
+}
+
+void installsignal(int sig, char *name)
+{
+	struct sigaction	sa;
+	char			msg[80];
+
+	sa.sa_handler = sighdlr;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	if (sigaction(sig, &sa, NULL) == -1)
+	{
+		snprintf(msg, sizeof msg, "could not install %s handler", name);
+		printf(msg);
+		exit(1);
+	}
+}
 
 int udp_bind(int sock, u_int16_t port, char *my_address)
 {
@@ -510,7 +546,12 @@ int main(int argc, char *argv[])
 	setupresolver();
 	setupmemcache();
 
-	while (1)
+	installsignal(SIGCHLD, "CHLD");
+	installsignal(SIGTERM, "TERM");
+	installsignal(SIGUSR1, "USR1");
+	installsignal(SIGHUP, "HUP");
+
+	while (!stop)
 	{
 		nb = recvfrom(so, inbuf, INBUF_SIZE, 0, &paddr, &plen);
 		if (nb == -1)
