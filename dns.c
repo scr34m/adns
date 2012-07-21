@@ -318,8 +318,7 @@ int answerquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 		} else
 		{
 			rv = 0;
-			struct sockaddr_in sin = (struct sockaddr_in *) paddr;
-			printf("answerquery %s to %s\n", hostname, inet_ntoa(sin.sin_addr));
+			printf("answerquery %s to %s\n", hostname, inet_ntoa( ((struct sockaddr_in *) &paddr)->sin_addr));
 		}
 	}
 
