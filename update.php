@@ -1,5 +1,4 @@
 <?php
-setcookie('asd', 'asd');
 $db = new mysqli('localhost', 'root', '', 'adns');
 
 if ( !$_REQUEST['password'] || !$_REQUEST['user'] )

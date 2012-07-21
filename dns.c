@@ -34,16 +34,15 @@ get 2y.hu
 #define INBUF_SIZE	(4096)
 #define MAXLINE		(256)
 
+// nencache
+struct memcache *mc;
+char *mc_instance = "127.0.0.1:11211";
+
 // socket
 int so;
 struct sockaddr paddr;
 socklen_t plen = (socklen_t) sizeof(paddr);
 u_int16_t port = 53;
-
-// resolver
-ldns_resolver *resolver;
-char *domainname;
-char *resolv_conf;
 
 // misc
 int debug = 0;
@@ -52,17 +51,16 @@ volatile sig_atomic_t   stop;
 
 void sighdlr(int sig)
 {
-	switch (sig) {
-	case SIGINT:
-	case SIGTERM:
-		stop = 1;
-		break;
-	case SIGHUP:
-		break;
-	case SIGCHLD:
-		while (waitpid(WAIT_ANY, NULL, WNOHANG) != -1) /* sig safe */
-			;
-		break;
+	switch (sig)
+	{
+		case SIGINT:
+		case SIGTERM:
+			stop = 1;
+			break;
+		case SIGHUP:
+			break;
+		case SIGCHLD:
+			break;
 	}
 }
 
@@ -169,10 +167,9 @@ int answerquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 	ldns_rr_list		*answer_a = NULL;
 	ldns_rr_list		*answer_ns1 = NULL;
 	ldns_rr_list		*answer_ns2 = NULL;
-	ldns_rr_list		*answer_cname = NULL;
-	ldns_rr_list		*answer_mx = NULL;
+//	ldns_rr_list		*answer_cname = NULL;
+//	ldns_rr_list		*answer_mx = NULL;
 	ldns_rr_list		*answer_soa = NULL;
-	ldns_rr_list		*answer_ad = NULL;
 	ldns_rr_list		*answer_qr = NULL;
 	ldns_pkt		*answer_pkt = NULL;
 	ldns_rr			*myrr = NULL;
@@ -271,11 +268,6 @@ int answerquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 		goto unwind;
 	ldns_rr_list_push_rr(answer_qr, ldns_rr_clone(query_rr));
 
-	/* additional section */
-	answer_ad = ldns_rr_list_new();
-	if (answer_ad == NULL)
-		goto unwind;
-
 	/* actual packet */
 	answer_pkt = ldns_pkt_new();
 	if (answer_pkt == NULL)
@@ -284,8 +276,6 @@ int answerquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 	ldns_pkt_set_qr(answer_pkt, 1);
 	ldns_pkt_set_aa(answer_pkt, 1);
 	ldns_pkt_set_id(answer_pkt, id);
-	if (ipaddr == NULL)
-		ldns_pkt_set_rcode(answer_pkt, LDNS_RCODE_NXDOMAIN);
 
 	ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_QUESTION, answer_qr);
 
@@ -311,8 +301,6 @@ int answerquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 	if (answer_ns2 && (type != LDNS_RR_TYPE_ANY && type != LDNS_RR_TYPE_NS))
 		ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_AUTHORITY, answer_ns2);
 
-	ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_ADDITIONAL, answer_ad);
-
 	status = ldns_pkt2wire(&outbuf, answer_pkt, &answer_size);
 	if (status != LDNS_STATUS_OK)
 	{
@@ -326,11 +314,12 @@ int answerquery(char *hn, char *ip, ldns_rr *query_rr, u_int16_t id)
 
 		if (sendto(so, outbuf, answer_size, 0, &paddr, plen) == -1)
 		{
-			printf("answerquery sendto\n");
+			printf("answerquery sendto error\n");
 		} else
 		{
 			rv = 0;
-			printf("answerquery %s to %s\n", hostname, ipaddr ? ipaddr : "NXdomain");
+			struct sockaddr_in sin = (struct sockaddr_in *) paddr;
+			printf("answerquery %s to %s\n", hostname, inet_ntoa(sin.sin_addr));
 		}
 	}
 
@@ -349,142 +338,72 @@ unwind:
 		ldns_rr_list_free(answer_ns2);
 	if (answer_soa)
 		ldns_rr_list_free(answer_soa);
-	if (answer_ad)
-		ldns_rr_list_free(answer_ad);
 
 	return (rv);
 }
 
-int forwardquery(char *hostname, ldns_rr *query_rr, u_int16_t id)
+int nxdomain(char *hn, ldns_rr *query_rr, u_int16_t id)
 {
-	size_t answer_size;
-	u_int16_t qflags = LDNS_RD;
-	uint8_t *outbuf = NULL;
-	ldns_rdf *qname = NULL;
-	ldns_pkt *respkt = NULL;
-	ldns_rr_type type;
-	ldns_rr_class clas;
-	ldns_status status;
-	int rv = 1, child = 0;
+	ldns_status		status;
+	ldns_rr_list		*answer_qr = NULL;
+	ldns_pkt		*answer_pkt = NULL;
+	uint8_t			*outbuf = NULL;
+	size_t			answer_size;
+	int			rv = 1;
+	char		*hostname = NULL;
 
-	switch (fork())
-	{
-		case -1:
-			printf("cannot fork\n");
-			break;
-		case 0:
-			child = 1;
-			break;
-		default:
-			return (0);
-	}
+	hostname = hn;
 
-	qname = ldns_dname_new_frm_str(hostname);
-	if (!qname)
-	{
-		printf("forwardquery: can't make qname\n");
+	/* question section */
+	answer_qr = ldns_rr_list_new();
+	if (answer_qr == NULL)
 		goto unwind;
-	}
-	type = ldns_rr_get_type(query_rr);
-	clas = ldns_rr_get_class(query_rr);
-	respkt = ldns_resolver_query(resolver, qname, type, clas, qflags);
-	if (respkt == NULL)
-	{
-		/* dns query failed so lets spoof it instead of timing out */
-		printf("forwardquery: query failed, spoofing response\n");
+	ldns_rr_list_push_rr(answer_qr, ldns_rr_clone(query_rr));
 
-		/* XXX make this tunable? */
-		answerquery(hostname, NULL, query_rr, id);
+	/* actual packet */
+	answer_pkt = ldns_pkt_new();
+	if (answer_pkt == NULL)
 		goto unwind;
-	}
-	if (debug)
-	{
-		printf("forwardquery response:\n");
-		logpacket(respkt);
-	}
+	
+	ldns_pkt_set_qr(answer_pkt, 1);
+	ldns_pkt_set_aa(answer_pkt, 1);
+	ldns_pkt_set_id(answer_pkt, id);
 
-	ldns_pkt_set_id(respkt, id);
-	status = ldns_pkt2wire(&outbuf, respkt, &answer_size);
+	ldns_pkt_set_rcode(answer_pkt, LDNS_RCODE_NXDOMAIN);
+
+	ldns_pkt_push_rr_list(answer_pkt, LDNS_SECTION_QUESTION, answer_qr);
+
+	status = ldns_pkt2wire(&outbuf, answer_pkt, &answer_size);
 	if (status != LDNS_STATUS_OK)
-		printf("can't create answer: %s\n",
-		    ldns_get_errorstr_by_id(status));
-	else {
+	{
+		printf("can't create answer: %s\n", ldns_get_errorstr_by_id(status));
+	} else
+	{
+		if (debug) {
+			printf("answerquery response:\n");
+			logpacket(answer_pkt);
+		}
+
 		if (sendto(so, outbuf, answer_size, 0, &paddr, plen) == -1)
-			printf("forwardquery sendto\n");
-		else {
+		{
+			printf("answerquery sendto error\n");
+		} else
+		{
 			rv = 0;
-			printf("forwardquery: resolved %s\n", hostname);
+			printf("answerquery %s to NXdomain\n", hostname);
 		}
 	}
 
 unwind:
-	if (respkt)
-		ldns_pkt_free(respkt);
+	if (answer_pkt)
+		ldns_pkt_free(answer_pkt);
 	if (outbuf)
 		LDNS_FREE(outbuf);
-	if (qname)
-		ldns_rdf_free(qname);
-
-	if (child)
-		_exit(0);
+	if (answer_qr)
+		ldns_rr_list_free(answer_qr);
 
 	return (rv);
 }
-
-void setupresolver(void)
-{
-	ldns_status		status;
-	char			*action = "using", *es;
-	char			buf[128];
-	ldns_rdf		*dn;
-	size_t			i;
-
-	if (resolver) {
-		ldns_resolver_free(resolver);
-		free(domainname); /* XXX is this ok for ldns? */
-		resolver = NULL;
-		domainname = NULL;
-		action = "rereading";
-	}
-
-	status = ldns_resolver_new_frm_file(&resolver, resolv_conf);
-	if (status != LDNS_STATUS_OK) {
-		if (asprintf(&es, "bad resolv.conf file: %s", ldns_get_errorstr_by_id(status)) == -1)
-			err(1, "setupresolver");
-//		fatalx(es);
-	}
-
-	dn = ldns_resolver_domain(resolver);
-	if (dn == NULL) {
-		domainname = NULL;
-		if (gethostname(buf, sizeof buf) == -1) {
-			printf("getdomainname failed\n");
-			domainname = NULL;
-		} else {
-			i = 0;
-			while (buf[i] != '.' && i < strlen(buf) -1)
-				i++;
-
-			if (buf[i] == '.' && strlen(buf) > 1) {
-				i++;
-				if (asprintf(&domainname, "%s", &buf[i]) == -1)
-					err(1, "setupresolver");
-			}
-		}
-	} else {
-		domainname = ldns_rdf2str(dn);
-		i = strlen(domainname);
-		if (i >= 1)
-			i--;
-		if (domainname[i] == '.')
-			domainname[i] = '\0';
-	}
-
-	printf("%s %s, serving: %s\n", action, resolv_conf, domainname ? domainname : "no local domain set");
-}
-
-struct memcache *mc;
-char *mc_instance = "127.0.0.1:11211";
 
 void setupmemcache()
 {
@@ -543,7 +462,6 @@ int main(int argc, char *argv[])
 	if (udp_bind(so, port, listen_addr))
 		err(1, "can't udp bind");
 
-	setupresolver();
 	setupmemcache();
 
 	installsignal(SIGCHLD, "CHLD");
@@ -590,16 +508,16 @@ int main(int argc, char *argv[])
 				printf("A\n");
 				break;
 			case LDNS_RR_TYPE_CNAME:
-				printf("A\n");
+				printf("CNAME\n");
 				break;
 			case LDNS_RR_TYPE_MX:
-				printf("A\n");
+				printf("MX\n");
 				break;
 			case LDNS_RR_TYPE_NS:
-				printf("A\n");
+				printf("NS\n");
 				break;
 			case LDNS_RR_TYPE_SOA:
-				printf("A\n");
+				printf("SOA\n");
 				break;
 			default:
 				printf("unknow %d\n", type);
@@ -616,7 +534,7 @@ int main(int argc, char *argv[])
 
 			answerquery(hostname, &buf, query_rr, id);
 		} else {
-			forwardquery(hostname, query_rr, id);
+			nxdomain(hostname, query_rr, id);
 		}
 
 		free(hostname);
